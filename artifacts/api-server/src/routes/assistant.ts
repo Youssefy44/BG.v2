@@ -3,12 +3,9 @@ import Groq from "groq-sdk";
 
 const router = Router();
 
-function getGroqClient(): Groq {
-  if (!process.env.GROQ_API_KEY) {
-    throw new Error("GROQ_API_KEY environment variable is not set. Add it in Secrets to enable the AI assistant.");
-  }
-  return new Groq({ apiKey: process.env.GROQ_API_KEY });
-}
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
+});
 
 const SYSTEM_PROMPT = `You are a knowledgeable assistant for Borland Groover (BG) appointment setter representatives at Patient Support Services. You answer questions accurately and concisely based on the BG reference knowledge below. Always be direct and practical — reps are on live calls and need fast answers.
 
@@ -223,16 +220,6 @@ router.post("/assistant", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
-
-  let groq: Groq;
-  try {
-    groq = getGroqClient();
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : "Groq client unavailable";
-    res.write(`data: ${JSON.stringify({ error: msg })}\n\n`);
-    res.end();
-    return;
-  }
 
   try {
     const stream = await groq.chat.completions.create({
