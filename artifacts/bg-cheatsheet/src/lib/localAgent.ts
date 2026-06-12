@@ -661,12 +661,13 @@ function tokenize(text: string): string[] {
     .toLowerCase()
     .replace(/[^\w\s]/g, " ")
     .split(/\s+/)
-    .filter((t) => t.length > 2);
+    .filter((t) => t.length >= 2); // >=2 catches hfu, np, pa, egd, dap, fu, etc.
 }
 
-function scoreEntry(entry: KnowledgeEntry, queryTokens: string[]): number {
+function scoreEntry(entry: KnowledgeEntry, queryTokens: string[], rawQuery: string): number {
   if (queryTokens.length === 0) return 0;
 
+  const lcQuery = rawQuery.toLowerCase();
   const titleLower = entry.title.toLowerCase();
   const categoryLower = entry.category.toLowerCase();
   const allKeywords = entry.keywords.map((k) => k.toLowerCase());
@@ -674,13 +675,35 @@ function scoreEntry(entry: KnowledgeEntry, queryTokens: string[]): number {
 
   let score = 0;
 
-  for (const token of queryTokens) {
-    if (token.length < 3) continue;
+  // Phrase-level match: entire keyword phrase appears verbatim in query (highest priority)
+  for (const kw of allKeywords) {
+    if (lcQuery.includes(kw)) {
+      // Multi-word phrases score higher than single-word hits
+      score += kw.split(" ").length >= 2 ? 10 : 4;
+    }
+  }
 
-    if (titleLower.includes(token)) score += 3;
+  // Title phrase match
+  if (lcQuery.includes(titleLower)) score += 8;
+
+  // Token-level matching
+  for (const token of queryTokens) {
+    if (token.length < 2) continue;
+
+    // Exact title word(s)
+    if (titleLower === token) score += 5;
+    else if (titleLower.split(" ").includes(token)) score += 4;
+    else if (titleLower.includes(token)) score += 3;
+
+    // Exact keyword match
+    if (allKeywords.some((k) => k === token)) score += 3;
     else if (allKeywords.some((k) => k.includes(token) || token.includes(k))) score += 2;
-    else if (categoryLower.includes(token)) score += 1;
-    else if (answerLower.includes(token)) score += 0.5;
+
+    // Category match
+    if (categoryLower === token || categoryLower.includes(token)) score += 1.5;
+
+    // Answer body match (lower weight)
+    if (answerLower.includes(token)) score += 0.4;
   }
 
   return score;
@@ -722,39 +745,93 @@ function findProviderAnswer(query: string): string | null {
   return null;
 }
 
+// Detect follow-up questions and augment with prior context
+function buildEffectiveQuery(question: string, history: Message[]): string {
+  const q = question.trim();
+  const words = q.split(/\s+/);
+
+  // Short or follow-up phrased questions get combined with last user message
+  const followUpStarters = /^(and|but|what about|how about|also|what if|when|can i|do i|is there|ok|okay|so|then|why|does|would|should)/i;
+  const isShortFollowUp = words.length <= 6 && (followUpStarters.test(q) || q.endsWith("?"));
+
+  if (isShortFollowUp && history.length >= 2) {
+    const lastUser = [...history].reverse().find((m) => m.role === "user");
+    if (lastUser) return `${lastUser.content} ${q}`;
+  }
+
+  return q;
+}
+
 export function getAnswer(question: string, history: Message[]): string {
   const q = question.trim();
   if (!q) return "Please ask a question and I'll help you!";
 
-  const tokens = tokenize(q);
+  const lcq = q.toLowerCase();
 
+  // Greeting shortcuts
+  if (/^(hi|hello|hey|howdy)\b/i.test(q) && q.split(" ").length <= 3) {
+    return "Hi! I'm your BG reference assistant. Ask me about scheduling rules, routing, scripts, providers, disposition codes, or any BG policy. What do you need?";
+  }
+
+  // Provider lookup (highest priority)
   const providerAnswer = findProviderAnswer(q);
   if (providerAnswer) return providerAnswer;
 
+  // Build effective query (handles follow-up questions)
+  const effectiveQ = buildEffectiveQuery(q, history);
+  const tokens = tokenize(effectiveQ);
+
   const scored = KB.map((entry) => ({
     entry,
-    score: scoreEntry(entry, tokens),
+    score: scoreEntry(entry, tokens, effectiveQ),
   })).sort((a, b) => b.score - a.score);
 
-  const topMatches = scored.filter((s) => s.score > 0).slice(0, 3);
+  const topMatches = scored.filter((s) => s.score > 0);
 
   if (topMatches.length === 0) {
-    const lcq = q.toLowerCase();
-    if (lcq.includes("hello") || lcq.includes("hi") || lcq.includes("hey")) {
-      return "Hi! I'm your BG reference assistant. Ask me about scheduling rules, routing, scripts, providers, disposition codes, or any other BG policy. What do you need help with?";
+    // Check for category-level questions
+    const categories: Record<string, string> = {
+      scheduling: "patient types (new/established), follow-up vs long follow-up, HFU, DAP, EGD, rescheduling, waitlist, OV timing",
+      routing: "warm transfers, blind transfers, interpreter services, all department routes (billing, insurance, imaging, clinical, etc.)",
+      scripts: "opening, closing, voicemail, callback, warm transfer scripts",
+      insurance: "insurance topics we don't discuss, insurance entry rules, Tricare",
+      locations: "Volusia, Santa Rosa, Georgia, hospital locations, new patient location rules",
+      hipaa: "chart lookup, HIPAA authorization, when to verify demographics",
+      disposition: "all 14 disposition codes and when to use them",
+      systems: "NextGen PM, NextGen EHR, Phreesia",
+      general: "KPI goals, BG main line, Teams channels, medical titles, Cologuard, WeCare, surgery center abbreviations",
+    };
+
+    for (const [cat, desc] of Object.entries(categories)) {
+      if (lcq.includes(cat)) {
+        const entry = KB.filter((e) => e.category.toLowerCase() === cat);
+        if (entry.length > 0) {
+          return entry.map((e) => e.answer).join("\n\n---\n\n");
+        }
+      }
     }
-    return `I don't have specific information about that in my knowledge base. Here are some things to try:\n\n• Check the **SharePoint Scheduling Cheat Sheet** for the latest policies\n• Ask in the **Theta Teams Chat** for team guidance\n• If it's a provider question, check the **Provider Directory** section\n\nYou can also ask me about: scheduling rules, HFU, DAP colonoscopy, rescheduling, routing/transfers, call scripts, insurance topics, or location rules.`;
+
+    const categoryList = Object.entries(categories)
+      .map(([cat, desc]) => `• **${cat.charAt(0).toUpperCase() + cat.slice(1)}:** ${desc}`)
+      .join("\n");
+
+    return `I don't have specific information about that. Here's what I can help with:\n\n${categoryList}\n\n→ For anything else, check the **SharePoint Cheat Sheet** or ask in **Theta Teams Chat**.`;
   }
 
-  if (topMatches.length === 1 || topMatches[0].score > topMatches[1].score * 2) {
+  // Only 1 strong result or top result dominates clearly
+  if (topMatches.length === 1 || topMatches[0].score > topMatches[1].score * 1.8) {
     return topMatches[0].entry.answer;
   }
 
-  const [first, ...rest] = topMatches;
+  // Multiple close results — merge the top 2–3 if they are related
+  const [first, second, third] = topMatches;
   let combined = first.entry.answer;
 
-  if (rest[0] && rest[0].score >= first.score * 0.5) {
-    combined += `\n\n---\n**Related — ${rest[0].entry.title}:**\n${rest[0].entry.answer}`;
+  if (second && second.score >= first.score * 0.55) {
+    combined += `\n\n---\n**Also related — ${second.entry.title}:**\n${second.entry.answer}`;
+  }
+  if (third && third.score >= first.score * 0.45 && third.entry.category === first.entry.category) {
+    combined += `\n\n---\n**Also — ${third.entry.title}:**\n${third.entry.answer}`;
   }
 
   return combined;
