@@ -1,1 +1,2 @@
 - [BG App Architecture](bg-app-architecture.md) — key data files, local agent design, ⌘K palette structure
+- [Groq Lazy Init](groq-lazy-init.md) — API server must use lazy Groq client init or it crashes on startup without GROQ_API_KEY
