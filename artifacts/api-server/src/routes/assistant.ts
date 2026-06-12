@@ -3,16 +3,9 @@ import Groq from "groq-sdk";
 
 const router = Router();
 
-let _groq: Groq | null = null;
-function getGroq(): Groq {
-  if (!_groq) {
-    if (!process.env.GROQ_API_KEY) {
-      throw new Error("GROQ_API_KEY is not configured. Please add it to your environment secrets.");
-    }
-    _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  }
-  return _groq;
-}
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
+});
 
 const SYSTEM_PROMPT = `You are a knowledgeable assistant for Borland Groover (BG) appointment setter representatives at Patient Support Services. You answer questions accurately and concisely based on the BG reference knowledge below. Always be direct and practical — reps are on live calls and need fast answers.
 
@@ -229,7 +222,7 @@ router.post("/assistant", async (req, res) => {
   res.setHeader("Connection", "keep-alive");
 
   try {
-    const stream = await getGroq().chat.completions.create({
+    const stream = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       max_tokens: 1024,
       messages,
